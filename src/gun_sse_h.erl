@@ -1,4 +1,4 @@
-%% Copyright (c) 2017-2019, Loïc Hoguin <essen@ninenines.eu>
+%% Copyright (c) 2017-2023, Loïc Hoguin <essen@ninenines.eu>
 %%
 %% Permission to use, copy, modify, and/or distribute this software for any
 %% purpose with or without fee is hereby granted, provided that the above
@@ -25,15 +25,19 @@
 }).
 
 %% @todo In the future we want to allow different media types.
-%% @todo For text/event-stream specifically, the parameters must be ignored.
 
 -spec init(pid(), reference(), _, cow_http:headers(), _)
 	-> {ok, #state{}} | disable.
 init(ReplyTo, StreamRef, _, Headers, _) ->
 	case lists:keyfind(<<"content-type">>, 1, Headers) of
-		{_, <<"text/event-stream">>} ->
-			{ok, #state{reply_to=ReplyTo, stream_ref=StreamRef,
-				sse_state=cow_sse:init()}};
+		{_, ContentType} ->
+			case cow_http_hd:parse_content_type(ContentType) of
+				{<<"text">>, <<"event-stream">>, _Ignored} ->
+					{ok, #state{reply_to=ReplyTo, stream_ref=StreamRef,
+						sse_state=cow_sse:init()}};
+				_ ->
+					disable
+			end;
 		_ ->
 			disable
 	end.

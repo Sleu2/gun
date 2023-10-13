@@ -16,7 +16,8 @@ Connection:
 
 * link:man:gun:open(3)[gun:open(3)] - Open a connection to the given host and port
 * link:man:gun:open_unix(3)[gun:open_unix(3)] - Open a connection to the given Unix domain socket
-// @todo * link:man:gun:shutdown(3)[gun:shutdown(3)] - Gracefully close the connection
+* link:man:gun:set_owner(3)[gun:set_owner(3)] - Set a new owner for the connection
+* link:man:gun:shutdown(3)[gun:shutdown(3)] - Gracefully close the connection
 * link:man:gun:close(3)[gun:close(3)] - Brutally close the connection
 * link:man:gun:info(3)[gun:info(3)] - Obtain information about the connection
 
@@ -63,6 +64,7 @@ by sending any of the following messages:
 Connection:
 
 * link:man:gun_up(3)[gun_up(3)] - The connection is up
+* link:man:gun_tunnel_up(3)[gun_tunnel_up(3)] - The tunnel is up
 * link:man:gun_down(3)[gun_down(3)] - The connection is down
 * link:man:gun_upgrade(3)[gun_upgrade(3)] - Successful protocol upgrade
 * link:man:gun_error(3)[gun_error(3)] - Stream or connection-wide error
@@ -96,7 +98,7 @@ connect_destination() :: #{
 
     username  => iodata(),
     password  => iodata(),
-    protocols => [http | http2],
+    protocols => protocols(),
     transport => tcp | tls,
 
     tls_opts              => [ssl:tls_client_option()],
@@ -121,15 +123,17 @@ username, password::
 Proxy authorization credentials. They are only sent when
 both options are provided.
 
-protocol (http)::
+protocols - see below::
 
-Protocol that will be used for tunneled requests.
+Ordered list of preferred protocols. Please refer to the
+`protocols()` type documentation for details.
++
+Defaults to `[http]` when the transport is `tcp`,
+and `[http2, http]` when the transport is `tls`.
 
 transport (tcp)::
 
-Transport that will be used for tunneled requests. Note that
-due to Erlang/OTP limitations it is not possible to tunnel
-a TLS connection inside a TLS tunnel.
+Transport that will be used for tunneled requests.
 
 tls_opts ([])::
 
@@ -144,10 +148,12 @@ Handshake timeout for tunneled TLS connections.
 [source,erlang]
 ----
 http_opts() :: #{
-    flow                  => pos_integer(),
-    keepalive             => timeout(),
-    transform_header_name => fun((binary()) -> binary()),
-    version               => 'HTTP/1.1' | 'HTTP/1.0'
+    closing_timeout             => timeout(),
+    cookie_ignore_informational => boolean(),
+    flow                        => pos_integer(),
+    keepalive                   => timeout(),
+    transform_header_name       => fun((binary()) -> binary()),
+    version                     => 'HTTP/1.1' | 'HTTP/1.0'
 }
 ----
 
@@ -156,6 +162,17 @@ Configuration for the HTTP protocol.
 The default value is given next to the option name:
 
 // @todo Document content_handlers and gun_sse_h.
+
+closing_timeout (15000)::
+
+Time to wait before brutally closing the connection when a
+graceful shutdown was requested via a call to
+link:man:gun:shutdown(3)[gun:shutdown(3)].
+
+cookie_ignore_informational (false)::
+
+Whether cookies received inside informational responses
+(1xx status code) must be ignored.
 
 flow - see below::
 
@@ -188,8 +205,30 @@ HTTP version to use.
 [source,erlang]
 ----
 http2_opts() :: #{
-    flow      => pos_integer(),
-    keepalive => timeout()
+    closing_timeout             => timeout(),
+    cookie_ignore_informational => boolean(),
+    flow                        => pos_integer(),
+    keepalive                   => timeout(),
+    keepalive_tolerance         => non_neg_integer(),
+
+    %% HTTP/2 state machine configuration.
+    connection_window_margin_size  => 0..16#7fffffff,
+    connection_window_update_threshold => 0..16#7fffffff,
+    enable_connect_protocol        => boolean(),
+    initial_connection_window_size => 65535..16#7fffffff,
+    initial_stream_window_size     => 0..16#7fffffff,
+    max_concurrent_streams         => non_neg_integer() | infinity,
+    max_connection_window_size     => 0..16#7fffffff,
+    max_decode_table_size          => non_neg_integer(),
+    max_encode_table_size          => non_neg_integer(),
+    max_frame_size_received        => 16384..16777215,
+    max_frame_size_sent            => 16384..16777215 | infinity,
+    max_stream_buffer_size         => non_neg_integer(),
+    max_stream_window_size         => 0..16#7fffffff,
+    preface_timeout                => timeout(),
+    settings_timeout               => timeout(),
+    stream_window_margin_size      => 0..16#7fffffff,
+    stream_window_update_threshold => 0..16#7fffffff
 }
 ----
 
@@ -199,16 +238,32 @@ The default value is given next to the option name:
 
 // @todo Document content_handlers and gun_sse_h.
 
+closing_timeout (15000)::
+
+Time to wait before brutally closing the connection when a
+graceful shutdown was requested either via a call to
+link:man:gun:shutdown(3)[gun:shutdown(3)] or by the server.
+
+cookie_ignore_informational (false)::
+
+Whether cookies received inside informational responses
+(1xx status code) must be ignored.
+
 flow - see below::
 
 The initial flow control value for all HTTP/2 streams.
 By default flow control is disabled.
 
-keepalive (5000)::
+keepalive (infinity)::
 
 Time between pings in milliseconds.
 
-// @todo Allow and document max_frame_size_sent.
+keepalive_tolerance - see below::
+
+The number of unacknowledged pings in flight that are
+tolerated before the connection is closed. By default
+this mechanism is disabled even if `keepalive` is
+enabled.
 
 === opts()
 
@@ -216,10 +271,11 @@ Time between pings in milliseconds.
 ----
 opts() :: #{
     connect_timeout       => timeout(),
+    cookie_store          => gun_cookies:store(),
     domain_lookup_timeout => timeout(),
     http_opts             => http_opts(),
     http2_opts            => http2_opts(),
-    protocols             => [http | http2],
+    protocols             => protocols(),
     retry                 => non_neg_integer(),
     retry_fun             => fun(),
     retry_timeout         => pos_integer(),
@@ -241,6 +297,15 @@ connect_timeout (infinity)::
 
 Connection timeout.
 
+cookie_store - see below::
+
+The cookie store that Gun will use for this connection.
+When configured, Gun will query the store for cookies
+and include them in the request headers; and add cookies
+found in response headers to the store.
++
+By default no cookie store will be used.
+
 domain_lookup_timeout (infinity)::
 
 Domain lookup timeout.
@@ -255,13 +320,11 @@ Options specific to the HTTP/2 protocol.
 
 protocols - see below::
 
-Ordered list of preferred protocols. When the transport is `tcp`,
-this list must contain exactly one protocol. When the transport
-is `tls`, this list must contain at least one protocol and will be
-used to negotiate a protocol via ALPN. When the server does not
-support ALPN then `http` will always be used. Defaults to
-`[http]` when the transport is `tcp`, and `[http2, http]` when the
-transport is `tls`.
+Ordered list of preferred protocols. Please refer to the
+`protocols()` type documentation for details.
++
+Defaults to `[http]` when the transport is `tcp`,
+and `[http2, http]` when the transport is `tls`.
 
 retry (5)::
 
@@ -299,9 +362,11 @@ supervise (true)::
 Whether the Gun process should be started under the `gun_sup`
 supervisor. Set to `false` to use your own supervisor.
 
-tcp_opts ([])::
+tcp_opts (DefaultOpts)::
 
 TCP options used when establishing the connection.
+By default Gun enables send timeouts with the options
+`[{send_timeout, 15000}, {send_timeout_close, true}]`.
 
 tls_handshake_timeout (infinity)::
 
@@ -325,6 +390,40 @@ port used. Port 443 defaults to `tls`. All other ports default to `tcp`.
 ws_opts (#{})::
 
 Options specific to the Websocket protocol.
+
+=== protocols()
+
+[source,erlang]
+----
+Protocol :: http | {http, http_opts()}
+          | http2 | {http2, http2_opts()}
+          | raw | {raw, raw_opts()}
+          | socks | {socks, socks_opts()}
+
+protocols() :: [Protocol]
+----
+
+Ordered list of preferred protocols. When the transport is `tcp`,
+this list must contain exactly one protocol. When the transport
+is `tls`, this list must contain at least one protocol and will be
+used to negotiate a protocol via ALPN. When the server does not
+support ALPN then `http` will be used, except when the list of
+preferred protocols is set to only accept `socks`.
+
+Defaults to `[http]` when the transport is `tcp`,
+and `[http2, http]` when the transport is `tls`.
+
+=== raw_opts()
+
+[source,erlang]
+----
+raw_opts() :: #{
+}
+----
+
+Configuration for the "raw" protocol.
+
+// The default value is given next to the option name:
 
 === req_headers()
 
@@ -359,14 +458,89 @@ reply_to (`self()`)::
 
 The pid of the process that will receive the response messages.
 
+=== socks_opts()
+
+[source,erlang]
+----
+socks_opts() :: #{
+    host := inet:hostname() | inet:ip_address(),
+    port := inet:port_number(),
+
+    auth      => [{username_password, binary(), binary()} | none],
+    protocols => protocols(),
+    transport => tcp | tls,
+    version   => 5,
+
+    tls_opts              => [ssl:tls_client_option()],
+    tls_handshake_timeout => timeout()
+}
+----
+
+Configuration for the Socks protocol.
+
+The default value, if any, is given next to the option name:
+
+host, port::
+
+Destination hostname and port number. Mandatory.
++
+Upon successful completion of the Socks connection, Gun will
+begin using these as the host and port of the origin server
+for subsequent requests.
+
+auth ([none])::
+
+Authentication methods Gun advertises to the Socks proxy.
+
+protocols - see below::
+
+Ordered list of preferred protocols. Please refer to the
+`protocols()` type documentation for details.
++
+Defaults to `[http]` when the transport is `tcp`,
+and `[http2, http]` when the transport is `tls`.
+
+transport (tcp)::
+
+Transport that will be used for tunneled requests.
+
+tls_opts ([])::
+
+Options to use for tunneled TLS connections.
+
+tls_handshake_timeout (infinity)::
+
+Handshake timeout for tunneled TLS connections.
+
+version (5)::
+
+Version of the Socks protocol to use.
+
+=== stream_ref()
+
+[source,erlang]
+----
+stream_ref() - see below
+----
+
+Unique identifier for a stream.
+
+The exact type is considered to be an implementation
+detail.
+
 === ws_opts()
 
 [source,erlang]
 ----
 ws_opts() :: #{
-    compress  => boolean(),
-    flow      => pos_integer(),
-    protocols => [{binary(), module()}]
+    closing_timeout  => timeout(),
+    compress         => boolean(),
+    default_protocol => module(),
+    flow             => pos_integer(),
+    keepalive        => timeout(),
+    protocols        => [{binary(), module()}],
+    silence_pings    => boolean(),
+    user_opts        => any()
 }
 ----
 
@@ -374,28 +548,67 @@ Configuration for the Websocket protocol.
 
 The default value is given next to the option name:
 
+closing_timeout (15000)::
+
+Time to wait before brutally closing the connection when a
+graceful shutdown was requested either via a call to
+link:man:gun:shutdown(3)[gun:shutdown(3)] or by the server.
+
 compress (false)::
 
 Whether to enable permessage-deflate compression. This does
 not guarantee that compression will be used as it is the
 server that ultimately decides. Defaults to false.
 
+default_protocol (gun_ws_h)::
+
+Default protocol module when no Websocket subprotocol is
+negotiated.
+
 flow - see below::
 
 The initial flow control value for the Websocket connection.
 By default flow control is disabled.
 
+keepalive (infinity)::
+
+Time between pings in milliseconds.
+
 protocols ([])::
 
 A non-empty list enables Websocket protocol negotiation. The
 list of protocols will be sent in the sec-websocket-protocol
-request header. The handler module interface is currently
-undocumented and must be set to `gun_ws_h`.
+request header. The given module must follow the
+link:man:gun_ws_protocol(3)[gun_ws_protocol(3)] interface.
+Gun comes with a default interface in `gun_ws_h` that may
+be reused for negotiated protocols.
 
-// @todo Document default_protocol and user_opts.
+silence_pings (true)::
+
+Whether the ping and pong frames should be sent to the user.
+In all cases Gun will automatically send a pong frame back
+when receiving a ping.
+
+user_opts - see below::
+
+Additional options that are not in use by Gun unless a custom
+Websocket subprotocol is configured and negotiated.
+By default no user option is defined.
 
 == Changelog
 
+* *2.0*: The `default_protocol` and `user_opts` Websocket
+         options were added.
+* *2.0*: The `stream_ref()` type was added.
+* *2.0*: The option `cookie_store` was added. It can be used
+         to configure a cookie store that Gun will use
+         automatically. A related option, `cookie_ignore_informational`,
+         was added to both `http_opts()` and `http2_opts()`.
+* *2.0*: The types `protocols()` and `socks_opts()` have been
+         added. Support for the Socks protocol has been added
+         in every places where protocol selection is available.
+         In addition it is now possible to specify separate
+         HTTP options for the CONNECT proxy and the origin server.
 * *2.0*: The `connect_timeout` option has been split into
          three options: `domain_lookup_timeout`, `connect_timeout`
          and when applicable `tls_handshake_timeout`.
@@ -412,7 +625,9 @@ undocumented and must be set to `gun_ws_h`.
          lowercased as well.
 * *2.0*: Function `gun:headers/4,5` introduced.
 * *2.0*: The `keepalive` option is now set to `infinity` by
-         default for the HTTP/1.1 protocol, disabling it.
+         default for all protocols. This means it is disabled.
+* *2.0*: Websocket options `keepalive` and `silence_pings` introduced.
+* *2.0*: Remove the `protocol` option from `connect_destination()`.
 * *1.3*: Add the CONNECT destination's `protocols` option and
          deprecate the previously introduced `protocol` option.
 * *1.2*: Introduce the type `connect_destination()`.

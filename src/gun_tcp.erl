@@ -1,4 +1,4 @@
-%% Copyright (c) 2011-2019, Loïc Hoguin <essen@ninenines.eu>
+%% Copyright (c) 2011-2023, Loïc Hoguin <essen@ninenines.eu>
 %%
 %% Permission to use, copy, modify, and/or distribute this software for any
 %% purpose with or without fee is hereby granted, provided that the above
@@ -91,6 +91,7 @@ try_connect([], _, _, _, _, Error) ->
 	Error.
 
 maybe_exit({error, einval}) -> exit(badarg);
+maybe_exit({error, eaddrnotavail}) -> exit(badarg);
 maybe_exit(Error) -> Error.
 
 -spec send(inet:socket(), iodata()) -> ok | {error, atom()}.

@@ -1,4 +1,4 @@
-%% Copyright (c) 2019, Loïc Hoguin <essen@ninenines.eu>
+%% Copyright (c) 2019-2023, Loïc Hoguin <essen@ninenines.eu>
 %%
 %% Permission to use, copy, modify, and/or distribute this software for any
 %% purpose with or without fee is hereby granted, provided that the above
@@ -40,10 +40,6 @@
 
 -module(gun_tls_proxy).
 -behaviour(gen_statem).
-
--ifdef(OTP_RELEASE).
--compile({nowarn_deprecated_function, [{ssl, ssl_accept, 2}]}).
--endif.
 
 %% Gun-specific interface.
 -export([start_link/7]).
@@ -95,6 +91,7 @@
 	extra :: any()
 }).
 
+%-define(DEBUG_PROXY,1).
 -ifdef(DEBUG_PROXY).
 -define(DEBUG_LOG(Format, Args),
 	io:format(user, "(~p) ~p:~p/~p:" ++ Format ++ "~n",
@@ -113,6 +110,8 @@ start_link(Host, Port, Opts, Timeout, OutSocket, OutTransport, Extra) ->
 			[]) of
 		{ok, Pid} when is_port(OutSocket) ->
 			ok = gen_tcp:controlling_process(OutSocket, Pid),
+			{ok, Pid};
+		{ok, Pid} when is_map(OutSocket) ->
 			{ok, Pid};
 		{ok, Pid} when not is_pid(OutSocket) ->
 			ok = ssl:controlling_process(OutSocket, Pid),
@@ -237,11 +236,7 @@ not_connected(cast, Msg={setopts, _}, State) ->
 	{keep_state_and_data, postpone};
 not_connected(cast, Msg={connect_proc, {ok, Socket}}, State=#state{owner_pid=OwnerPid, extra=Extra}) ->
 	?DEBUG_LOG("msg ~0p state ~0p", [Msg, State]),
-	Protocol = case ssl:negotiated_protocol(Socket) of
-		{ok, <<"h2">>} -> gun_http2;
-		_ -> gun_http
-	end,
-	OwnerPid ! {?MODULE, self(), {ok, Protocol}, Extra},
+	OwnerPid ! {?MODULE, self(), {ok, ssl:negotiated_protocol(Socket)}, Extra},
 	%% We need to spawn this call before OTP-21.2 because it triggers
 	%% a cb_setopts call that blocks us. Might be OK to just leave it
 	%% like this once we support 21.2+ only.
@@ -266,6 +261,27 @@ connected({call, From}, Msg={send, Data}, State=#state{proxy_socket=Socket}) ->
 	?DEBUG_LOG("spawned ~0p", [SpawnedPid]),
 	keep_state_and_data;
 %% Messages from the proxy socket.
+%%
+%% When the out_socket is a #{stream_ref := _} map we know that processing
+%% of the data isn't yet complete. We wrap the message in a handle_continue
+%% tuple and provide the StreamRef for further processing.
+connected(info, Msg={ssl, Socket, Data}, State=#state{owner_pid=OwnerPid, proxy_socket=Socket,
+		out_socket=#{handle_continue_stream_ref := StreamRef}}) ->
+	?DEBUG_LOG("msg ~0p state ~0p", [Msg, State]),
+	OwnerPid ! {handle_continue, StreamRef, {tls_proxy, self(), Data}},
+	keep_state_and_data;
+connected(info, Msg={ssl_closed, Socket}, State=#state{owner_pid=OwnerPid, proxy_socket=Socket,
+		out_socket=#{handle_continue_stream_ref := StreamRef}}) ->
+	?DEBUG_LOG("msg ~0p state ~0p", [Msg, State]),
+	OwnerPid ! {handle_continue, StreamRef, {tls_proxy_closed, self()}},
+	keep_state_and_data;
+connected(info, Msg={ssl_error, Socket, Reason}, State=#state{owner_pid=OwnerPid, proxy_socket=Socket,
+		out_socket=#{handle_continue_stream_ref := StreamRef}}) ->
+	?DEBUG_LOG("msg ~0p state ~0p", [Msg, State]),
+	OwnerPid ! {handle_continue, StreamRef, {tls_proxy_error, self(), Reason}},
+	keep_state_and_data;
+%% When the out_socket is anything else then the data is sent like normal
+%% socket data. It does not need to be handled specially.
 connected(info, Msg={ssl, Socket, Data}, State=#state{owner_pid=OwnerPid, proxy_socket=Socket}) ->
 	?DEBUG_LOG("msg ~0p state ~0p", [Msg, State]),
 	OwnerPid ! {tls_proxy, self(), Data},
@@ -321,8 +337,9 @@ handle_common(cast, Msg={send_result, From, Result}, State) ->
 	gen_statem:reply(From, Result),
 	keep_state_and_data;
 %% Messages from the real socket.
-handle_common(info, Msg={OK, Socket, Data}, State=#state{proxy_pid=ProxyPid,
-		out_socket=Socket, out_messages={OK, _, _}}) ->
+%% @todo Make _Socket and __Socket match again.
+handle_common(info, Msg={OK, _Socket, Data}, State=#state{proxy_pid=ProxyPid,
+		out_socket=__Socket, out_messages={OK, _, _}}) ->
 	?DEBUG_LOG("msg ~0p state ~0p", [Msg, State]),
 	ProxyPid ! {tls_proxy, self(), Data},
 	keep_state_and_data;
@@ -393,24 +410,31 @@ proxy_active(State=#state{proxy_pid=ProxyPid, proxy_active=Active0, proxy_buffer
 	end,
 	State#state{proxy_active=Active, proxy_buffer= <<>>}.
 
--ifdef(TEST).
-tcp_test() ->
+-ifdef(DISABLED_TEST).
+proxy_test_() ->
+	{timeout, 15000, [
+		{"TCP proxy", fun proxy_tcp1_t/0},
+		{"TLS proxy", fun proxy_ssl1_t/0},
+		{"Double TLS proxy", fun proxy_ssl2_t/0}
+	]}.
+
+proxy_tcp1_t() ->
 	ssl:start(),
 	{ok, Socket} = gen_tcp:connect("google.com", 443, [binary, {active, false}]),
 	{ok, ProxyPid1} = start_link("google.com", 443, [], 5000, Socket, gen_tcp, #{}),
 	send(ProxyPid1, <<"GET / HTTP/1.1\r\nHost: google.com\r\n\r\n">>),
-	receive {tls_proxy, ProxyPid1, <<"HTTP/1.1 ", _/bits>>} -> ok after 1000 -> error(timeout) end.
+	receive {tls_proxy, ProxyPid1, <<"HTTP/1.1 ", _/bits>>} -> ok end.
 
-ssl_test() ->
+proxy_ssl1_t() ->
 	ssl:start(),
 	_ = (catch ct_helper:make_certs_in_ets()),
 	{ok, _, Port} = do_proxy_start("google.com", 443),
 	{ok, Socket} = ssl:connect("localhost", Port, [binary, {active, false}]),
 	{ok, ProxyPid1} = start_link("google.com", 443, [], 5000, Socket, ssl, #{}),
 	send(ProxyPid1, <<"GET / HTTP/1.1\r\nHost: google.com\r\n\r\n">>),
-	receive {tls_proxy, ProxyPid1, <<"HTTP/1.1 ", _/bits>>} -> ok after 1000 -> error(timeout) end.
+	receive {tls_proxy, ProxyPid1, <<"HTTP/1.1 ", _/bits>>} -> ok end.
 
-ssl2_test() ->
+proxy_ssl2_t() ->
 	ssl:start(),
 	_ = (catch ct_helper:make_certs_in_ets()),
 	{ok, _, Port1} = do_proxy_start("google.com", 443),
@@ -419,7 +443,7 @@ ssl2_test() ->
 	{ok, ProxyPid1} = start_link("localhost", Port1, [], 5000, Socket, ssl, #{}),
 	{ok, ProxyPid2} = start_link("google.com", 443, [], 5000, ProxyPid1, ?MODULE, #{}),
 	send(ProxyPid2, <<"GET / HTTP/1.1\r\nHost: google.com\r\n\r\n">>),
-	receive {tls_proxy, ProxyPid2, <<"HTTP/1.1 ", _/bits>>} -> ok after 1000 -> error(timeout) end.
+	receive {tls_proxy, ProxyPid2, <<"HTTP/1.1 ", _/bits>>} -> ok end.
 
 do_proxy_start(Host, Port) ->
 	Self = self(),
@@ -432,8 +456,8 @@ do_proxy_init(Parent, Host, Port) ->
 	{ok, ListenSocket} = ssl:listen(0, [binary, {active, false}|Opts]),
 	{ok, {_, ListenPort}} = ssl:sockname(ListenSocket),
 	Parent ! {self(), ListenPort},
-	{ok, ClientSocket} = ssl:transport_accept(ListenSocket, 10000),
-	ok = ssl:ssl_accept(ClientSocket, 10000),
+	{ok, ClientSocket0} = ssl:transport_accept(ListenSocket, 10000),
+	{ok, ClientSocket} = ssl:handshake(ClientSocket0, 10000),
 	{ok, OriginSocket} = gen_tcp:connect(
 		Host, Port,
 		[binary, {active, false}]),

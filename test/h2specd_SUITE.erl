@@ -1,4 +1,4 @@
-%% Copyright (c) 2018-2019, Loïc Hoguin <essen@ninenines.eu>
+%% Copyright (c) 2018-2023, Loïc Hoguin <essen@ninenines.eu>
 %%
 %% Permission to use, copy, modify, and/or distribute this software for any
 %% purpose with or without fee is hereby granted, provided that the above
@@ -97,7 +97,8 @@ run_tests([Port|Tail]) ->
 	try
 		{ok, Conn} = gun:open("127.0.0.1", Port, #{
 			protocols => [http2],
-			retry => 0
+			retry => 0,
+			tcp_opts => [{nodelay, true}]
 		}),
 		MRef = monitor(process, Conn),
 		{ok, http2} = gun:await_up(Conn),

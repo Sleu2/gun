@@ -1,4 +1,4 @@
-%% Copyright (c) 2017-2019, Loïc Hoguin <essen@ninenines.eu>
+%% Copyright (c) 2017-2023, Loïc Hoguin <essen@ninenines.eu>
 %%
 %% Permission to use, copy, modify, and/or distribute this software for any
 %% purpose with or without fee is hereby granted, provided that the above
@@ -20,10 +20,10 @@
 
 -record(state, {
 	reply_to :: pid(),
-	stream_ref :: reference()
+	stream_ref :: gun:stream_ref()
 }).
 
--spec init(pid(), reference(), _, _, _) -> {ok, #state{}}.
+-spec init(pid(), gun:stream_ref(), _, _, _) -> {ok, #state{}}.
 init(ReplyTo, StreamRef, _, _, _) ->
 	{ok, #state{reply_to=ReplyTo, stream_ref=StreamRef}}.
 

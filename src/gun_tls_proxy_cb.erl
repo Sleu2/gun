@@ -1,4 +1,4 @@
-%% Copyright (c) 2019, Loïc Hoguin <essen@ninenines.eu>
+%% Copyright (c) 2019-2023, Loïc Hoguin <essen@ninenines.eu>
 %%
 %% Permission to use, copy, modify, and/or distribute this software for any
 %% purpose with or without fee is hereby granted, provided that the above
@@ -20,6 +20,7 @@
 -export([controlling_process/2]).
 -export([send/2]).
 -export([setopts/2]).
+-export([close/1]).
 
 %% The connect/4 function is called by the process
 %% that calls ssl:connect/2,3,4.
@@ -35,3 +36,6 @@ send(Socket, Data) ->
 
 setopts(Socket, Opts) ->
 	gun_tls_proxy:cb_setopts(Socket, Opts).
+
+close(_) ->
+	ok.
